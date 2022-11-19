@@ -13,6 +13,7 @@ import fileinput
 import logging
 import sys
 import fasttext
+from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -21,6 +22,7 @@ logging.basicConfig(format='%(levelname)s:%(message)s')
 ft_model_file_name = r'/workspace/datasets/fasttext/query_classifier_10k.bin'
 
 ft_model = fasttext.load_model(ft_model_file_name)
+model = SentenceTransformer('all-MiniLM-L6-v2')
 
 # expects clicks and impressions to be in the row
 def create_prior_queries_from_group(
@@ -194,8 +196,23 @@ def create_query(user_query, click_prior_query, filters, sort="_score", sortDir=
         query_obj["_source"] = source
     return query_obj
 
+def create_vector_query(user_query, size=10, source=None):
+    queries = [ user_query ]
+    embedding = model.encode(queries)
+    return {
+         "size": size,
+         "query": {
+             "knn": {
+                 "embeddedName": {
+                     "vector": embedding[0],
+                     "k": size
+                 }
+             }
+         },
+         "_source": source
+     }
 
-def search(client, user_query, index="bbuy_products", sort="_score", sortDir="desc", synonyms=False):
+def search(client, user_query, index="bbuy_products", sort="_score", sortDir="desc", synonyms=False, vector=False):
     #### classify the query
     labels, probas = ft_model.predict(user_query, k=10)
     #### create filters and boosts
@@ -214,8 +231,11 @@ def search(client, user_query, index="bbuy_products", sort="_score", sortDir="de
             }
         ]
     # Note: you may also want to modify the `create_query` method above
-    query_obj = create_query(user_query, click_prior_query=None, filters=filters, sort=sort, sortDir=sortDir, \
-        source=["name", "shortDescription"], synonyms=synonyms)
+    if vector:
+        query_obj = create_vector_query(user_query, source=["name", "shortDescription"])
+    else:
+        query_obj = create_query(user_query, click_prior_query=None, filters=filters, sort=sort, sortDir=sortDir, \
+            source=["name", "shortDescription"], synonyms=synonyms)
     logging.info(query_obj)
     response = client.search(query_obj, index=index)
     if response and response['hits']['hits'] and len(response['hits']['hits']) > 0:
@@ -233,6 +253,8 @@ if __name__ == "__main__":
                          help='The name of the main index to search')
     general.add_argument("--synonyms", action='store_true',
                          help='Flag to query name.synomyms instead of name field')
+    general.add_argument("--vector", action='store_true',
+                         help='Flag to use vector query')
     general.add_argument("-s", '--host', default="localhost",
                          help='The OpenSearch host name')
     general.add_argument("-p", '--port', type=int, default=9200,
@@ -267,6 +289,7 @@ if __name__ == "__main__":
     )
     index_name = args.index
     synonyms = args.synonyms
+    vector = args.vector
     query_prompt = "\nEnter your query (type 'Exit' to exit or hit ctrl-c):"
     print(query_prompt)
     while True:
@@ -274,7 +297,7 @@ if __name__ == "__main__":
         query = line.rstrip()
         if query == "Exit":
             break
-        search(client=opensearch, user_query=query, index=index_name, synonyms=synonyms)
+        search(client=opensearch, user_query=query, index=index_name, synonyms=synonyms, vector=vector)
 
         print(query_prompt)
 
